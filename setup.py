@@ -1,8 +1,9 @@
 import ast
 import re
 import sys
-from setuptools import setup, Extension
 from typing import List
+
+from setuptools import Extension, setup
 
 try:
     import Cython
@@ -20,6 +21,9 @@ if not hasattr(sys, "pypy_version_info"):
         Extension("fastavro._validation", ["fastavro/_validation" + ext]),
         Extension("fastavro._logical_readers", ["fastavro/_logical_readers" + ext]),
         Extension("fastavro._logical_writers", ["fastavro/_logical_writers" + ext]),
+        Extension(
+            "fastavro.bytes_speed_compare", ["fastavro/bytes_speed_compare" + ext]
+        ),
     ]
 
 
