@@ -2,7 +2,7 @@ import copy
 import dataclasses
 import hashlib
 import json
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Tuple
 
 from ._schema_common import PRIMITIVES
 
@@ -28,7 +28,10 @@ def hash_schema(schema: Any) -> str:
 
 
 def depth_first_walk_schema(
-    schema, cb_before: Callable[[Any], Any], cb_after: Callable[[Any], Any]
+    schema,
+    cb_before: Callable[[Any], Any],
+    cb_after: Callable[[Any], Any],
+    strict: bool,
 ) -> Any:
     """
     Walks the schema, calling cb_before on each node before recursing and cb_after after
@@ -46,50 +49,48 @@ def depth_first_walk_schema(
         - fixed
         - schema is a string
     """
+    strict_err_msg = (
+        "In a dictionary with a 'type' key, type-key value has to "
+        "be a string, describing a primitive type or "
+        "one of 'record', 'array', 'map', 'enum', 'fixed'. "
+        "Set 'strict' to False to allow other types."
+    )
 
     def recurse(s):
-        return depth_first_walk_schema(s, cb_before, cb_after)
+        return depth_first_walk_schema(s, cb_before, cb_after, strict=strict)
 
     schema = cb_before(copy.copy(schema))
     if isinstance(schema, dict):
         if "type" in schema:
-            if "logicalType" in schema:
-                # need to check it is well-formed. Can't be
-                # record, array, map, enum or fixed (as there require further attributes)
-                if (
-                    isinstance(schema["type"], str)
-                    and schema["type"] in TYPES_WITH_ATTRIBUTES
-                ):
-                    raise ValueError(
-                        f"Logical type {schema['logicalType']} "
-                        "cannot be applied to "
-                        f"{schema['type']} on same level, need sub-dict."
-                    )
+            if isinstance(schema["type"], str):
+                if schema["type"] == "record":
+                    new_fields = []
+                    for field in schema["fields"]:
+                        field = copy.copy(field)
+                        field["type"] = recurse(field["type"])
+                        new_fields.append(field)
+                    schema["fields"] = new_fields
+                elif schema["type"] == "array":
+                    schema["items"] = recurse(schema["items"])
+                elif schema["type"] == "map":
+                    schema["values"] = recurse(schema["values"])
+                elif schema["type"] in {"enum", "fixed"}:
+                    # does not need recursion; dict-schema is the type
+                    pass
+                else:
+                    if strict:
+                        if not schema["type"] in PRIMITIVES:
+                            raise ValueError(strict_err_msg)
+                    # for others, the "str" reprsents type, so we recurse
+                    schema["type"] = recurse(schema["type"])
+            elif isinstance(schema["type"], (list, dict)):
+                # also needs recursion as represent type
+                if strict:
+                    raise ValueError(strict_err_msg)
+
                 schema["type"] = recurse(schema["type"])
             else:
-                if isinstance(schema["type"], str):
-                    if schema["type"] == "record":
-                        new_fields = []
-                        for field in schema["fields"]:
-                            field = copy.copy(field)
-                            field["type"] = recurse(field["type"])
-                            new_fields.append(field)
-                        schema["fields"] = new_fields
-                    elif schema["type"] == "array":
-                        schema["items"] = recurse(schema["items"])
-                    elif schema["type"] == "map":
-                        schema["values"] = recurse(schema["values"])
-                    elif schema["type"] in {"enum", "fixed"}:
-                        # does not need recursion; dict-schema is the type
-                        pass
-                    else:
-                        # for others, the "str" reprsents type, so we recurse
-                        schema["type"] = recurse(schema["type"])
-                elif isinstance(schema["type"], (list, dict)):
-                    # also needs recursion as represent type
-                    schema["type"] = recurse(schema["type"])
-                else:
-                    raise ValueError(f"Unknown schema type {type(schema['type'])}")
+                raise ValueError(f"Unknown schema type {type(schema['type'])}")
         else:
             raise ValueError("Schema dict does not have a 'type' key.")
     elif isinstance(schema, list):  # union type
@@ -224,23 +225,28 @@ class Decomposer:
 
     def after(self, schema: Any) -> Any:
         def add_hashed_schema(schema: Any, prefix: str) -> Any:
-            schema_name = f"{prefix}_{hash_schema(schema)}"
+            schema_name = f"__{prefix}_{hash_schema(schema)}"
+            if schema_name in self.schemas_dict:
+                # raise error ... but should check if it is
+                # same instead
+                raise ValueError(f"Schema already in dict: {schema_name}")
+
             self.schemas_dict[schema_name] = schema
             schema = schema_name
             self.hashed_schema_names.add(schema_name)
             return schema
 
         if isinstance(schema, dict):
-            if "logicalType" in schema:
-                schema = add_hashed_schema(schema, "logical")
-            elif "name" in schema:
+            if "name" in schema:
                 # named schemas can be decomposed
                 self.schemas_dict[schema["name"]] = schema
                 schema = schema["name"]
+            elif "logicalType" in schema:
+                schema = add_hashed_schema(schema, "logical")
             elif "type" in schema:
                 # need to deal with unnamed dict schemas
                 if isinstance(schema["type"], str) and schema["type"] in (
-                    "enum",
+                    "maps",
                     "array",
                 ):
                     # for this need to calculate a hashed name and insert
@@ -249,7 +255,7 @@ class Decomposer:
                 else:
                     raise ValueError(f"Unexpected schema for decomposition {schema}")
             else:
-                raise ValueError(f"Dict schema without hike {schema}")
+                raise ValueError(f"Dict schema without type {schema}")
         elif isinstance(schema, list):
             # should all be decomposed into named references
             for s in schema:
@@ -275,8 +281,41 @@ class Decomposer:
         return schema
 
 
+@dataclasses.dataclass
+class Assembler:
+    schemas_dict: dict
+    error_on_unknown: bool
+    resolved_named_schemas: set[str] = dataclasses.field(default_factory=set)
+    missing_schema_names: set[str] = dataclasses.field(default_factory=set)
+
+    def before(self, schema: Any) -> Any:
+        if isinstance(schema, str):
+            # try and resolve the name, unless it is a primitive
+            if schema not in PRIMITIVES:
+                if schema not in self.schemas_dict:
+                    if self.error_on_unknown:
+                        raise ValueError(f"Unknown schema {schema}")
+                    else:
+                        self.missing_schema_names.add(schema)
+                else:
+                    if schema.startswith("__"):
+                        schema = self.schemas_dict[schema]
+                    else:
+                        if schema not in self.resolved_named_schemas:
+                            self.resolved_named_schemas.add(schema)
+                            schema = self.schemas_dict[schema]
+                        else:
+                            # already resolved; should only include once
+                            pass
+
+        return schema
+
+    def after(self, schema: Any) -> Any:
+        return schema
+
+
 def parse_to_canonical(
-    schema: Any, keep_logicalType: bool, keep_attributes: bool
+    schema: Any, keep_logicalType: bool, keep_attributes: bool, strict: bool = True
 ) -> Any:
     """
     Parse a schema to a canonical form. This involves
@@ -299,18 +338,25 @@ def parse_to_canonical(
         schema = simplify(schema)
         return schema
 
-    return depth_first_walk_schema(schema, cb_before, cb_after)
+    return depth_first_walk_schema(schema, cb_before, cb_after, strict=strict)
 
 
-def decompose_schema(schema: Any) -> Any:
+def decompose_schema(schema: Any, strict: bool = True) -> Tuple[Any, Decomposer]:
     """
     Decompose a schema into a set of named schemas and references.
     """
     decomposer = Decomposer()
-    schema = depth_first_walk_schema(schema, decomposer.before, decomposer.after)
-    return (
-        schema,
-        decomposer.schemas_dict,
-        decomposer.referenced_schema_names,
-        decomposer.missing_schema_names,
+    schema = depth_first_walk_schema(
+        schema, decomposer.before, decomposer.after, strict=strict
     )
+    return (schema, decomposer)
+
+
+def reassemble_schema(
+    schema: Any, schemas_dict: Any, error_on_unknown: bool, strict: bool = True
+) -> Any:
+    assembler = Assembler(schemas_dict, error_on_unknown)
+    schema = depth_first_walk_schema(
+        schema, assembler.before, assembler.after, strict=strict
+    )
+    return (schema, assembler)

@@ -1,6 +1,8 @@
 import json
 from typing import Any, Dict
 
+import pytest
+
 from fastavro.parse_new import decompose_schema, parse_to_canonical
 
 input: Dict[str, Any] = dict(
@@ -79,7 +81,10 @@ def to_json_no_whitespace(obj):
 
 def test_parse_to_canonical():
     schema_out = parse_to_canonical(
-        input["schema_record_C"], keep_logicalType=True, keep_attributes=False
+        input["schema_record_C"],
+        keep_logicalType=True,
+        keep_attributes=False,
+        strict=False,
     )
     assert to_json_no_whitespace(schema_out) == to_json_no_whitespace(
         output["schema_record_C"]
@@ -88,11 +93,20 @@ def test_parse_to_canonical():
 
 def test_decompose():
     schema_out = parse_to_canonical(
-        input["schema_record_C"], keep_logicalType=True, keep_attributes=True
+        input["schema_record_C"],
+        keep_logicalType=True,
+        keep_attributes=True,
+        strict=False,
     )
-    decomposed_schema, sub_schemas, referenced_schema_names, missing_schema_names = (
-        decompose_schema(schema_out)
-    )
+    with pytest.raises(ValueError):
+        parse_to_canonical(
+            input["schema_record_C"],
+            keep_logicalType=True,
+            keep_attributes=True,
+            strict=True,
+        )
+
+    schema, decomposer = decompose_schema(schema_out, strict=False)
     exp_ref_schema_names = set(
         (
             "ns_C.C",
@@ -100,12 +114,12 @@ def test_decompose():
             "ns_C.A",
             "ns_C.fixed_item",
             "ns_C.myenum",
-            "array_95d849abd4f49d40e0efe5d1dd9dab63",
-            "union_9e050db2b774e33e2d03046c04c98671",
-            "logical_2bde359c645bfad7b5df654da2331627",
+            "__array_95d849abd4f49d40e0efe5d1dd9dab63",
+            "__union_9e050db2b774e33e2d03046c04c98671",
+            "__logical_2bde359c645bfad7b5df654da2331627",
         )
     )
-    assert decomposed_schema == "ns_C.C"
-    assert exp_ref_schema_names == set(sub_schemas.keys())
-    assert missing_schema_names == {"ns_D.D"}
-    assert referenced_schema_names == exp_ref_schema_names
+    assert schema == "ns_C.C"
+    assert exp_ref_schema_names == set(decomposer.schemas_dict.keys())
+    assert decomposer.missing_schema_names == {"ns_D.D"}
+    assert decomposer.referenced_schema_names == exp_ref_schema_names
