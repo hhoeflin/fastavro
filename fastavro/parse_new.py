@@ -29,8 +29,8 @@ def hash_schema(schema: Any) -> str:
 
 def depth_first_walk_schema(
     schema,
-    cb_before: Callable[[Any], Any],
-    cb_after: Callable[[Any], Any],
+    cb_before: Callable[[Any], Any] | None,
+    cb_after: Callable[[Any], Any] | None,
     strict: bool,
 ) -> Any:
     """
@@ -59,7 +59,9 @@ def depth_first_walk_schema(
     def recurse(s):
         return depth_first_walk_schema(s, cb_before, cb_after, strict=strict)
 
-    schema = cb_before(copy.copy(schema))
+    schema = copy.copy(schema)
+    if cb_before is not None:
+        schema = cb_before(schema)
     if isinstance(schema, dict):
         if "type" in schema:
             if isinstance(schema["type"], str):
@@ -99,7 +101,8 @@ def depth_first_walk_schema(
         pass
     else:
         raise ValueError(f"Unknown schema type {type(schema)}")
-    schema = cb_after(schema)
+    if cb_after is not None:
+        schema = cb_after(schema)
     return schema
 
 
@@ -253,7 +256,9 @@ class Decomposer:
                     # into schemas_dict
                     schema = add_hashed_schema(schema, schema["type"])
                 else:
-                    raise ValueError(f"Unexpected schema for decomposition {schema}")
+                    # we assume that the type below
+                    # has been appropriately processed
+                    pass
             else:
                 raise ValueError(f"Dict schema without type {schema}")
         elif isinstance(schema, list):
